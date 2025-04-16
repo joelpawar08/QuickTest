@@ -11,6 +11,7 @@ import pandas as pd
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 import av
 import torch
+import os
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -102,6 +103,8 @@ class_names = []
 # Function to load class names
 def load_classes(classes_file="classes.txt"):
     try:
+        if not os.path.exists(classes_file):
+            raise FileNotFoundError(f"Classes file {classes_file} not found")
         with open(classes_file, 'r') as f:
             classes = [line.strip() for line in f.readlines() if line.strip()]
         logger.info(f"Loaded {len(classes)} classes from {classes_file}")
@@ -115,6 +118,8 @@ def load_classes(classes_file="classes.txt"):
 def init_model(model_path="280.pt", conf_thres=0.35):
     global model, class_names
     try:
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file {model_path} not found")
         # Allowlist the DetectionModel class for safe loading
         torch.serialization.add_safe_globals([DetectionModel])
         
@@ -255,6 +260,7 @@ class VideoProcessor(VideoProcessorBase):
 def main():
     st.title("Grocery Product Detection")
     st.markdown("Detect grocery products using webcam or uploaded images")
+    st.markdown("**Note**: Webcam Detection may not work on Streamlit Cloud due to WebRTC limitations. Use Image Upload for reliable results.")
 
     # Mode selector
     mode = st.selectbox("Select Mode", ["Webcam Detection", "Image Upload"], key="mode")
@@ -284,7 +290,7 @@ def main():
         if ctx.video_processor:
             ctx.video_processor.set_conf_thres(conf_thres)
         
-        st.markdown("**Note**: Click 'Start' above to begin webcam feed. Ensure camera permissions are granted.")
+        st.markdown("**Note**: Click 'Start' above to begin webcam feed. Ensure camera permissions are granted. This feature may not work on Streamlit Cloud.")
         
     else:
         st.subheader("Image Upload Detection")
