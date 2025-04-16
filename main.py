@@ -17,7 +17,7 @@ import os
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Custom CSS for responsive and modern UI
+# Custom CSS for dark theme with red elements
 st.markdown("""
 <style>
     * {
@@ -25,58 +25,80 @@ st.markdown("""
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
     }
     .stApp {
-        background-color: #f0f2f5;
+        background-color: #1a1a1a;
         max-width: 1200px;
         margin: 0 auto;
         padding: 10px;
+        color: #ffffff;
     }
     h1 {
-        color: #2c3e50;
+        color: #ffffff;
         text-align: center;
         font-size: 2rem;
         margin-bottom: 1rem;
+        text-shadow: 0 2px 4px rgba(0,0,0,0.3);
     }
     .stSelectbox, .stSlider, .stFileUploader {
-        background: #fff;
+        background: #2c2c2c;
+        border: 2px solid #ff0000;
         border-radius: 8px;
         padding: 10px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        color: #ffffff;
+    }
+    .stSelectbox > div > div > div, .stSlider > div > div > div, .stFileUploader > div > div {
+        color: #ffffff;
     }
     .stButton>button {
-        background-color: #3498db;
-        color: white;
+        background-color: #ff0000;
+        color: #ffffff;
         border: none;
         padding: 10px 20px;
         border-radius: 5px;
         font-weight: 600;
-        transition: background-color 0.3s;
+        transition: background-color 0.3s, transform 0.2s;
         width: 100%;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
     }
     .stButton>button:hover {
-        background-color: #2980b9;
+        background-color: #cc0000;
+        transform: scale(1.05);
     }
     .result-container {
-        background: #fff;
+        background: #2c2c2c;
+        border: 2px solid #ff0000;
         border-radius: 8px;
         padding: 15px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
         margin-top: 15px;
+        color: #ffffff;
     }
     .result-image {
         max-width: 100%;
         border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
     }
     .error-message {
-        color: #e74c3c;
-        background: rgba(231, 76, 60, 0.1);
+        color: #ffffff;
+        background: rgba(255, 0, 0, 0.3);
         padding: 10px;
         border-radius: 5px;
         text-align: center;
         margin: 10px 0;
+        border: 1px solid #ff0000;
     }
     .stDataFrame {
         overflow-x: auto;
+        color: #ffffff;
+        background: #2c2c2c;
+        border: 1px solid #ff0000;
+        border-radius: 5px;
+    }
+    .stDataFrame table {
+        color: #ffffff;
+    }
+    .stDataFrame th, .stDataFrame td {
+        border: 1px solid #ff0000;
     }
     @media (max-width: 600px) {
         h1 {
@@ -260,7 +282,7 @@ class VideoProcessor(VideoProcessorBase):
 def main():
     st.title("Grocery Product Detection")
     st.markdown("Detect grocery products using webcam or uploaded images")
-    st.markdown("**Note**: Webcam Detection may not work on Streamlit Cloud due to WebRTC limitations. Use Image Upload for reliable results.")
+    st.markdown("**Note**: Webcam Detection may be slow or unavailable on mobile devices and Streamlit Cloud due to WebRTC limitations. Use Image Upload for best performance.")
 
     # Mode selector
     mode = st.selectbox("Select Mode", ["Webcam Detection", "Image Upload"], key="mode")
@@ -278,19 +300,29 @@ def main():
             key="webcam_conf"
         )
         
+        # Detect mobile device for lower resolution
+        is_mobile = "Mobile" in st._get_user_agent() or "Android" in st._get_user_agent() or "iPhone" in st._get_user_agent()
+        video_constraints = (
+            {"video": {"width": {"ideal": 640}, "height": {"ideal": 480}}, "audio": False}
+            if is_mobile
+            else {"video": {"width": {"ideal": 1280}, "height": {"ideal": 720}}, "audio": False}
+        )
+        
         # Initialize WebRTC streamer
         ctx = webrtc_streamer(
             key="webcam",
             video_processor_factory=VideoProcessor,
             rtc_configuration=RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}),
-            media_stream_constraints={"video": {"width": {"ideal": 1280}, "height": {"ideal": 720}}, "audio": False},
+            media_stream_constraints=video_constraints,
             async_processing=True
         )
         
         if ctx.video_processor:
             ctx.video_processor.set_conf_thres(conf_thres)
+        else:
+            st.warning("Webcam access failed. This feature may not work on Streamlit Cloud or mobile devices. Try Image Upload instead.")
         
-        st.markdown("**Note**: Click 'Start' above to begin webcam feed. Ensure camera permissions are granted. This feature may not work on Streamlit Cloud.")
+        st.markdown("**Note**: Click 'Start' to begin webcam feed. Ensure camera permissions are granted. This feature may be slow on mobile or unavailable on Streamlit Cloud.")
         
     else:
         st.subheader("Image Upload Detection")
