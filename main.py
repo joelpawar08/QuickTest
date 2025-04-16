@@ -4,11 +4,13 @@ import numpy as np
 import uuid
 import logging
 from ultralytics import YOLO
+from ultralytics.nn.tasks import DetectionModel
 from pathlib import Path
 from PIL import Image
 import pandas as pd
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 import av
+import torch
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -113,6 +115,10 @@ def load_classes(classes_file="classes.txt"):
 def init_model(model_path="280.pt", conf_thres=0.35):
     global model, class_names
     try:
+        # Allowlist the DetectionModel class for safe loading
+        torch.serialization.add_safe_globals([DetectionModel])
+        
+        # Initialize the YOLO model
         model = YOLO(model_path)
         model.conf = conf_thres
         class_names = load_classes()
@@ -120,6 +126,7 @@ def init_model(model_path="280.pt", conf_thres=0.35):
     except Exception as e:
         logger.error(f"Failed to initialize model: {str(e)}")
         st.error(f"Model initialization failed: {str(e)}")
+        model = None  # Explicitly set model to None on failure
 
 # Draw bounding boxes with improved visibility
 def draw_boxes(frame, boxes, confidences, class_ids):
@@ -170,8 +177,15 @@ def process_image(image_data, conf_thres=0.35, iou_thres=0.45):
     global model
     
     if model is None:
-        logger.info("Model not initialized, initializing now")
-        init_model(conf_thres=conf_thres)
+        logger.error("Model is not initialized")
+        try:
+            logger.info("Attempting to initialize model")
+            init_model(conf_thres=conf_thres)
+            if model is None:
+                raise ValueError("Model initialization failed")
+        except Exception as e:
+            logger.error(f"Model initialization failed: {str(e)}")
+            raise ValueError(f"Model initialization failed: {str(e)}")
     
     try:
         if isinstance(image_data, np.ndarray):
@@ -201,11 +215,10 @@ def process_image(image_data, conf_thres=0.35, iou_thres=0.45):
         scale_y = original_size[0] / process_size[0]
         
         result = results[0]
-        boxes = result.boxes.xyxy.cpu().numpy()  # Get boxes as numpy array
+        boxes = result.boxes.xyxy.cpu().numpy()
         confidences = result.boxes.conf.cpu().numpy()
         class_ids = result.boxes.cls.cpu().numpy()
         
-        # Scale boxes to original image size
         if boxes.shape[0] > 0:
             boxes[:, 0] *= scale_x  # x1
             boxes[:, 1] *= scale_y  # y1
