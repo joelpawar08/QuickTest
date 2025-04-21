@@ -101,7 +101,7 @@ def load_classes(classes_file):
         return ["product", "food", "beverage", "container", "package"]
 
 # Function to initialize models and their corresponding class files
-def init_models(model_paths=["280.pt", "maggie.pt"], conf_thres=0.35):
+def init_models(model_paths=["280.pt", "maggie.pt"], conf_thres=0.60):
     global models, class_names
     try:
         for model_path in model_paths:
