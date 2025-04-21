@@ -69,14 +69,13 @@ RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
 # Global model and class variables
-model = None
+models = {}
 class_names = []
 
 # Function to load class names
 def load_classes(classes_file="classes.txt"):
     try:
         if not os.path.exists(classes_file):
-            # Create a fallback classes file with common grocery items if not found
             default_classes = [
                 "apple", "banana", "orange", "water bottle", "soda", "milk", "bread", 
                 "cereal", "chips", "cookies", "pasta", "rice", "vegetables", "fruits",
@@ -95,35 +94,37 @@ def load_classes(classes_file="classes.txt"):
     except Exception as e:
         logger.error(f"Error loading classes file {classes_file}: {str(e)}")
         st.error(f"Failed to load classes: {str(e)}")
-        # Return some default classes as fallback
         return ["product", "food", "beverage", "container", "package"]
 
-# Function to initialize model
-def init_model(model_path="280.pt", conf_thres=0.35):
-    global model, class_names
+# Function to initialize models
+def init_models(model_paths=["280.pt", "maggie.pt"], conf_thres=0.35):
+    global models, class_names
     try:
-        if not os.path.exists(model_path):
-            st.error(f"Model file {model_path} not found. Please ensure the model file exists in the app directory.")
-            logger.error(f"Model file {model_path} not found")
-            return False
-            
-        # Allowlist the DetectionModel class for safe loading
+        for model_path in model_paths:
+            if not os.path.exists(model_path):
+                st.error(f"Model file {model_path} not found. Please ensure the model file exists in the app directory.")
+                logger.error(f"Model file {model_path} not found")
+                return False
+                
         torch.serialization.add_safe_globals([DetectionModel])
         
-        # Initialize the YOLO model
-        model = YOLO(model_path)
-        model.conf = conf_thres
+        # Initialize both YOLO models
+        for model_path in model_paths:
+            model = YOLO(model_path)
+            model.conf = conf_thres
+            models[model_path] = model
+            logger.info(f"Model {model_path} initialized with confidence threshold {conf_thres}")
+        
         class_names = load_classes()
-        logger.info(f"Model initialized with confidence threshold {conf_thres}")
         return True
     except Exception as e:
-        logger.error(f"Failed to initialize model: {str(e)}")
+        logger.error(f"Failed to initialize models: {str(e)}")
         st.error(f"Model initialization failed: {str(e)}")
-        model = None  # Explicitly set model to None on failure
+        models = {}
         return False
 
 # Draw bounding boxes with improved visibility
-def draw_boxes(frame, boxes, confidences, class_ids):
+def draw_boxes(frame, boxes, confidences, class_ids, model_name):
     global class_names
     detected_objects = []
     
@@ -143,39 +144,38 @@ def draw_boxes(frame, boxes, confidences, class_ids):
         else:
             label = class_names[label_idx]
         
-        color_hash = hash(label) % 0xFFFFFF
-        color = (color_hash & 0xFF, (color_hash >> 8) & 0xFF, (color_hash >> 16) & 0xFF)
+        # Different colors for different models
+        color = (0, 255, 0) if model_name == "280.pt" else (255, 0, 0)  # Green for 280.pt, Blue for maggie.pt
         
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, box_thickness)
         
-        text = f"{label}: {conf:.2f}"
+        text = f"{label}: {conf:.2f} ({model_name})"
         text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2)[0]
         
-        # Add a background to the text for better visibility
         cv2.rectangle(frame, (x1, y1 - text_size[1] - 10), (x1 + text_size[0] + 10, y1), color, -1)
         cv2.rectangle(frame, (x1, y1 - text_size[1] - 10), (x1 + text_size[0] + 10, y1), (0, 0, 0), 1)
         
-        # Add text with outline for better visibility on various backgrounds
         cv2.putText(frame, text, (x1 + 5, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), 2)
         cv2.putText(frame, text, (x1 + 5, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 1)
         
         detected_objects.append({
             "label": label,
             "confidence": round(conf, 2),
-            "bbox": [x1, y1, x2, y2]
+            "bbox": [x1, y1, x2, y2],
+            "model": model_name
         })
     
-    logger.info(f"Drew {len(detected_objects)} bounding boxes")
+    logger.info(f"Drew {len(detected_objects)} bounding boxes for {model_name}")
     return frame, detected_objects
 
-# Process a single image
+# Process a single image with both models
 def process_image(image_data, conf_thres=0.35, iou_thres=0.45):
-    global model
+    global models
     
-    if model is None:
-        logger.info("Model is not initialized, attempting to initialize")
-        if not init_model(conf_thres=conf_thres):
-            raise ValueError("Model initialization failed. Please check the model file.")
+    if not models:
+        logger.info("Models not initialized, attempting to initialize")
+        if not init_models():
+            raise ValueError("Model initialization failed. Please check the model files.")
     
     try:
         if isinstance(image_data, np.ndarray):
@@ -191,11 +191,9 @@ def process_image(image_data, conf_thres=0.35, iou_thres=0.45):
         logger.info(f"Processing image of size {img.shape}")
         original_size = img.shape[:2]
         
-        # Use dynamic resizing based on image aspect ratio
         max_dim = 1280
         h, w = original_size
         
-        # Calculate new dimensions while preserving aspect ratio
         if h > w:
             new_h = max_dim
             new_w = int(w * (max_dim / h))
@@ -206,36 +204,39 @@ def process_image(image_data, conf_thres=0.35, iou_thres=0.45):
         process_size = (new_h, new_w)
         img_resized = cv2.resize(img, (process_size[1], process_size[0]))
         
-        # Run inference with optimized parameters for multi-object detection
-        results = model(
-            img_resized,
-            conf=conf_thres,
-            iou=iou_thres,
-            augment=False,  # Set to False for faster processing
-            verbose=False,
-            max_det=50  # Allow detecting up to 50 objects in a single frame
-        )
+        processed_img = img.copy()
+        all_detected_objects = []
         
-        # Calculate scaling factors to map bounding boxes back to original image
-        scale_x = original_size[1] / process_size[1]
-        scale_y = original_size[0] / process_size[0]
+        # Process with both models
+        for model_name, model in models.items():
+            results = model(
+                img_resized,
+                conf=conf_thres,
+                iou=iou_thres,
+                augment=False,
+                verbose=False,
+                max_det=50
+            )
+            
+            scale_x = original_size[1] / process_size[1]
+            scale_y = original_size[0] / process_size[0]
+            
+            result = results[0]
+            boxes = result.boxes.xyxy.cpu().numpy()
+            confidences = result.boxes.conf.cpu().numpy()
+            class_ids = result.boxes.cls.cpu().numpy()
+            
+            if boxes.shape[0] > 0:
+                boxes[:, 0] *= scale_x
+                boxes[:, 1] *= scale_y
+                boxes[:, 2] *= scale_x
+                boxes[:, 3] *= scale_y
+            
+            processed_img, detected_objects = draw_boxes(processed_img, boxes, confidences, class_ids, model_name)
+            all_detected_objects.extend(detected_objects)
         
-        result = results[0]
-        boxes = result.boxes.xyxy.cpu().numpy()
-        confidences = result.boxes.conf.cpu().numpy()
-        class_ids = result.boxes.cls.cpu().numpy()
-        
-        if boxes.shape[0] > 0:
-            # Scale bounding boxes back to original image dimensions
-            boxes[:, 0] *= scale_x  # x1
-            boxes[:, 1] *= scale_y  # y1
-            boxes[:, 2] *= scale_x  # x2
-            boxes[:, 3] *= scale_y  # y2
-        
-        processed_img, detected_objects = draw_boxes(img.copy(), boxes, confidences, class_ids)
-        
-        logger.info(f"Image processed successfully, detected {len(detected_objects)} objects")
-        return processed_img, detected_objects
+        logger.info(f"Image processed successfully, detected {len(all_detected_objects)} objects across both models")
+        return processed_img, all_detected_objects
         
     except Exception as e:
         logger.error(f"Error processing image: {str(e)}")
@@ -244,12 +245,12 @@ def process_image(image_data, conf_thres=0.35, iou_thres=0.45):
 # Streamlit app
 def main():
     st.title("Grocery Product Detection")
-    st.markdown("Detect multiple grocery products in a single image")
+    st.markdown("Detect multiple grocery products using two YOLO models simultaneously")
     
-    # Initialize model at startup
-    if 'model_initialized' not in st.session_state:
-        with st.spinner("Loading model... This might take a moment"):
-            st.session_state.model_initialized = init_model()
+    # Initialize models at startup
+    if 'models_initialized' not in st.session_state:
+        with st.spinner("Loading models... This might take a moment"):
+            st.session_state.models_initialized = init_models()
 
     # Create tabs for different detection methods
     tab1, tab2 = st.tabs(["Camera", "Upload Image"])
@@ -258,7 +259,6 @@ def main():
         st.subheader("Camera Detection")
         st.markdown('<div class="camera-section">', unsafe_allow_html=True)
         
-        # Confidence threshold slider for camera
         conf_thres = st.slider(
             "Confidence Threshold",
             min_value=0.1,
@@ -268,47 +268,40 @@ def main():
             key="camera_conf"
         )
         
-        # Clear instructions for the user
         st.markdown("""
         ### How to use the camera:
         1. Click the "Take picture" button below
         2. Allow camera permissions when prompted
         3. Take a clear photo of the grocery items
-        4. The app will automatically detect products in your photo
+        4. Both models will automatically detect products in your photo
         """)
         
-        # Simple camera input - most reliable on mobile
         camera_input = st.camera_input("Take picture", key="camera")
         
         if camera_input:
             try:
-                with st.spinner("Processing image..."):
+                with st.spinner("Processing image with both models..."):
                     img_bytes = camera_input.getvalue()
                     processed_img, detected_objects = process_image(img_bytes, conf_thres=conf_thres)
                 
-                # Convert from BGR to RGB for display
                 processed_img_rgb = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
                 
-                # Display processed image
-                st.image(processed_img_rgb, caption="Detected Objects", use_column_width=True)
+                st.image(processed_img_rgb, caption="Detected Objects (Green: 280.pt, Blue: maggie.pt)", use_column_width=True)
                 
-                # Display detected objects
                 if detected_objects:
-                    st.success(f"Detected {len(detected_objects)} product{'s' if len(detected_objects) > 1 else ''}")
+                    st.success(f"Detected {len(detected_objects)} product{'s' if len(detected_objects) > 1 else ''} across both models")
                     
-                    # Create a dataframe of detected objects
                     df = pd.DataFrame([
-                        {"Product": obj["label"], "Confidence": f"{obj['confidence']*100:.1f}%"}
+                        {"Product": obj["label"], "Confidence": f"{obj['confidence']*100:.1f}%", "Model": obj["model"]}
                         for obj in detected_objects
                     ])
                     st.dataframe(df, use_container_width=True)
                     
-                    # Save the processed image
                     filename = f"{uuid.uuid4()}.jpg"
                     result_path = RESULTS_DIR / filename
                     cv2.imwrite(str(result_path), processed_img)
                 else:
-                    st.warning("No products detected. Try adjusting the confidence threshold or taking a clearer photo.")
+                    st.warning("No products detected by either model. Try adjusting the confidence threshold or taking a clearer photo.")
             
             except Exception as e:
                 st.error(f"Error processing image: {str(e)}")
@@ -316,7 +309,6 @@ def main():
         
         st.markdown('</div>', unsafe_allow_html=True)
         
-        # Help text for troubleshooting
         with st.expander("Camera not working?"):
             st.markdown("""
             ### Troubleshooting Tips:
@@ -331,7 +323,6 @@ def main():
     with tab2:
         st.subheader("Image Upload Detection")
         
-        # Confidence threshold slider for uploads
         conf_thres = st.slider(
             "Confidence Threshold",
             min_value=0.1,
@@ -341,7 +332,6 @@ def main():
             key="upload_conf"
         )
         
-        # File uploader
         uploaded_file = st.file_uploader(
             "Upload an image (JPG, PNG)", 
             type=["jpg", "jpeg", "png"],
@@ -350,48 +340,42 @@ def main():
         
         if uploaded_file is not None:
             try:
-                # Validate file size
                 if uploaded_file.size > 10 * 1024 * 1024:
                     st.error("File size exceeds 10MB limit")
                     logger.error("File size exceeds 10MB")
                 else:
-                    # Read and process image
                     img_data = uploaded_file.read()
                     
-                    # Process with status indicator
-                    with st.spinner("Processing image..."):
+                    with st.spinner("Processing image with both models..."):
                         processed_img, detected_objects = process_image(img_data, conf_thres=conf_thres)
                     
-                    # Save result
                     filename = f"{uuid.uuid4()}.jpg"
                     result_path = RESULTS_DIR / filename
                     cv2.imwrite(str(result_path), processed_img)
                     
-                    # Convert for display
                     processed_img_rgb = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
                     
-                    # Display results
                     st.markdown('<div class="result-container">', unsafe_allow_html=True)
-                    st.image(processed_img_rgb, caption="Detected Objects", use_column_width=True)
+                    st.image(processed_img_rgb, caption="Detected Objects (Green: 280.pt, Blue: maggie.pt)", use_column_width=True)
                     
                     if detected_objects:
-                        st.success(f"Detected {len(detected_objects)} product{'s' if len(detected_objects) > 1 else ''}")
+                        st.success(f"Detected {len(detected_objects)} product{'s' if len(detected_objects) > 1 else ''} across both models")
                         
-                        # Create a more detailed dataframe for multiple objects
                         df = pd.DataFrame([
                             {
                                 "Product": obj["label"], 
                                 "Confidence": f"{obj['confidence']*100:.1f}%",
+                                "Model": obj["model"]
                             }
                             for obj in detected_objects
                         ])
                         st.dataframe(df, use_container_width=True)
                     else:
-                        st.warning("No products detected. Try adjusting the confidence threshold or using a clearer image.")
+                        st.warning("No products detected by either model. Try adjusting the confidence threshold or using a clearer image.")
                     
                     st.markdown('</div>', unsafe_allow_html=True)
                     
-                    logger.info(f"Image detection completed, saved as {filename}")
+                    logger.info(f"Image detection completed with both models, saved as {filename}")
                 
             except ValueError as e:
                 st.error(str(e))
