@@ -124,7 +124,7 @@ def init_models(model_paths=["280.pt", "maggie.pt"], conf_thres=0.35):
         return False
 
 # Draw bounding boxes with improved visibility
-def draw_boxes(frame, boxes, confidences, class_ids, model_name):
+def draw_boxes(frame, boxes, confidences, class_ids):
     global class_names
     detected_objects = []
     
@@ -144,12 +144,12 @@ def draw_boxes(frame, boxes, confidences, class_ids, model_name):
         else:
             label = class_names[label_idx]
         
-        # Different colors for different models
-        color = (0, 255, 0) if model_name == "280.pt" else (255, 0, 0)  # Green for 280.pt, Blue for maggie.pt
+        color_hash = hash(label) % 0xFFFFFF
+        color = (color_hash & 0xFF, (color_hash >> 8) & 0xFF, (color_hash >> 16) & 0xFF)
         
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, box_thickness)
         
-        text = f"{label}: {conf:.2f} ({model_name})"
+        text = f"{label}: {conf:.2f}"
         text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 2)[0]
         
         cv2.rectangle(frame, (x1, y1 - text_size[1] - 10), (x1 + text_size[0] + 10, y1), color, -1)
@@ -161,19 +161,18 @@ def draw_boxes(frame, boxes, confidences, class_ids, model_name):
         detected_objects.append({
             "label": label,
             "confidence": round(conf, 2),
-            "bbox": [x1, y1, x2, y2],
-            "model": model_name
+            "bbox": [x1, y1, x2, y2]
         })
     
-    logger.info(f"Drew {len(detected_objects)} bounding boxes for {model_name}")
+    logger.info(f"Drew {len(detected_objects)} bounding boxes")
     return frame, detected_objects
 
-# Process a single image with both models
-def process_image(image_data, conf_thres=0.35, iou_thres=0.45):
+# Process a single image
+def process_image(image_data, selected_model, conf_thres=0.35, iou_thres=0.45):
     global models
     
-    if not models:
-        logger.info("Models not initialized, attempting to initialize")
+    if not models or selected_model not in models:
+        logger.info("Models not initialized or invalid model selected, attempting to initialize")
         if not init_models():
             raise ValueError("Model initialization failed. Please check the model files.")
     
@@ -204,53 +203,52 @@ def process_image(image_data, conf_thres=0.35, iou_thres=0.45):
         process_size = (new_h, new_w)
         img_resized = cv2.resize(img, (process_size[1], process_size[0]))
         
-        processed_img = img.copy()
-        all_detected_objects = []
+        # Run inference with selected model
+        results = models[selected_model](
+            img_resized,
+            conf=conf_thres,
+            iou=iou_thres,
+            augment=False,
+            verbose=False,
+            max_det=50
+        )
         
-        # Process with both models
-        for model_name, model in models.items():
-            results = model(
-                img_resized,
-                conf=conf_thres,
-                iou=iou_thres,
-                augment=False,
-                verbose=False,
-                max_det=50
-            )
-            
-            scale_x = original_size[1] / process_size[1]
-            scale_y = original_size[0] / process_size[0]
-            
-            result = results[0]
-            boxes = result.boxes.xyxy.cpu().numpy()
-            confidences = result.boxes.conf.cpu().numpy()
-            class_ids = result.boxes.cls.cpu().numpy()
-            
-            if boxes.shape[0] > 0:
-                boxes[:, 0] *= scale_x
-                boxes[:, 1] *= scale_y
-                boxes[:, 2] *= scale_x
-                boxes[:, 3] *= scale_y
-            
-            processed_img, detected_objects = draw_boxes(processed_img, boxes, confidences, class_ids, model_name)
-            all_detected_objects.extend(detected_objects)
+        scale_x = original_size[1] / process_size[1]
+        scale_y = original_size[0] / process_size[0]
         
-        logger.info(f"Image processed successfully, detected {len(all_detected_objects)} objects across both models")
-        return processed_img, all_detected_objects
+        result = results[0]
+        boxes = result.boxes.xyxy.cpu().numpy()
+        confidences = result.boxes.conf.cpu().numpy()
+        class_ids = result.boxes.cls.cpu().numpy()
+        
+        if boxes.shape[0] > 0:
+            boxes[:, 0] *= scale_x
+            boxes[:, 1] *= scale_y
+            boxes[:, 2] *= scale_x
+            boxes[:, 3] *= scale_y
+        
+        processed_img, detected_objects = draw_boxes(img.copy(), boxes, confidences, class_ids)
+        
+        logger.info(f"Image processed successfully with {selected_model}, detected {len(detected_objects)} objects")
+        return processed_img, detected_objects
         
     except Exception as e:
-        logger.error(f"Error processing image: {str(e)}")
+        logger.error(f"Error processing image with {selected_model}: {str(e)}")
         raise ValueError(f"Image processing error: {str(e)}")
 
 # Streamlit app
 def main():
     st.title("Grocery Product Detection")
-    st.markdown("Detect multiple grocery products using two YOLO models simultaneously")
+    st.markdown("Detect multiple grocery products using different YOLO models")
     
     # Initialize models at startup
     if 'models_initialized' not in st.session_state:
         with st.spinner("Loading models... This might take a moment"):
             st.session_state.models_initialized = init_models()
+
+    # Model selection
+    model_options = ["280.pt", "maggie.pt"]
+    selected_model = st.selectbox("Select Model", model_options, key="model_select")
 
     # Create tabs for different detection methods
     tab1, tab2 = st.tabs(["Camera", "Upload Image"])
@@ -273,26 +271,26 @@ def main():
         1. Click the "Take picture" button below
         2. Allow camera permissions when prompted
         3. Take a clear photo of the grocery items
-        4. Both models will automatically detect products in your photo
+        4. The app will automatically detect products in your photo
         """)
         
         camera_input = st.camera_input("Take picture", key="camera")
         
         if camera_input:
             try:
-                with st.spinner("Processing image with both models..."):
+                with st.spinner("Processing image..."):
                     img_bytes = camera_input.getvalue()
-                    processed_img, detected_objects = process_image(img_bytes, conf_thres=conf_thres)
+                    processed_img, detected_objects = process_image(img_bytes, selected_model, conf_thres=conf_thres)
                 
                 processed_img_rgb = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
                 
-                st.image(processed_img_rgb, caption="Detected Objects (Green: 280.pt, Blue: maggie.pt)", use_column_width=True)
+                st.image(processed_img_rgb, caption=f"Detected Objects (Model: {selected_model})", use_column_width=True)
                 
                 if detected_objects:
-                    st.success(f"Detected {len(detected_objects)} product{'s' if len(detected_objects) > 1 else ''} across both models")
+                    st.success(f"Detected {len(detected_objects)} product{'s' if len(detected_objects) > 1 else ''}")
                     
                     df = pd.DataFrame([
-                        {"Product": obj["label"], "Confidence": f"{obj['confidence']*100:.1f}%", "Model": obj["model"]}
+                        {"Product": obj["label"], "Confidence": f"{obj['confidence']*100:.1f}%"}
                         for obj in detected_objects
                     ])
                     st.dataframe(df, use_container_width=True)
@@ -301,7 +299,7 @@ def main():
                     result_path = RESULTS_DIR / filename
                     cv2.imwrite(str(result_path), processed_img)
                 else:
-                    st.warning("No products detected by either model. Try adjusting the confidence threshold or taking a clearer photo.")
+                    st.warning("No products detected. Try adjusting the confidence threshold or taking a clearer photo.")
             
             except Exception as e:
                 st.error(f"Error processing image: {str(e)}")
@@ -346,8 +344,8 @@ def main():
                 else:
                     img_data = uploaded_file.read()
                     
-                    with st.spinner("Processing image with both models..."):
-                        processed_img, detected_objects = process_image(img_data, conf_thres=conf_thres)
+                    with st.spinner("Processing image..."):
+                        processed_img, detected_objects = process_image(img_data, selected_model, conf_thres=conf_thres)
                     
                     filename = f"{uuid.uuid4()}.jpg"
                     result_path = RESULTS_DIR / filename
@@ -356,26 +354,25 @@ def main():
                     processed_img_rgb = cv2.cvtColor(processed_img, cv2.COLOR_BGR2RGB)
                     
                     st.markdown('<div class="result-container">', unsafe_allow_html=True)
-                    st.image(processed_img_rgb, caption="Detected Objects (Green: 280.pt, Blue: maggie.pt)", use_column_width=True)
+                    st.image(processed_img_rgb, caption=f"Detected Objects (Model: {selected_model})", use_column_width=True)
                     
                     if detected_objects:
-                        st.success(f"Detected {len(detected_objects)} product{'s' if len(detected_objects) > 1 else ''} across both models")
+                        st.success(f"Detected {len(detected_objects)} product{'s' if len(detected_objects) > 1 else ''}")
                         
                         df = pd.DataFrame([
                             {
                                 "Product": obj["label"], 
                                 "Confidence": f"{obj['confidence']*100:.1f}%",
-                                "Model": obj["model"]
                             }
                             for obj in detected_objects
                         ])
                         st.dataframe(df, use_container_width=True)
                     else:
-                        st.warning("No products detected by either model. Try adjusting the confidence threshold or using a clearer image.")
+                        st.warning("No products detected. Try adjusting the confidence threshold or using a clearer image.")
                     
                     st.markdown('</div>', unsafe_allow_html=True)
                     
-                    logger.info(f"Image detection completed with both models, saved as {filename}")
+                    logger.info(f"Image detection completed with {selected_model}, saved as {filename}")
                 
             except ValueError as e:
                 st.error(str(e))
