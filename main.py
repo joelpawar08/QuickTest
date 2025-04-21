@@ -70,10 +70,14 @@ RESULTS_DIR.mkdir(exist_ok=True)
 
 # Global model and class variables
 models = {}
-class_names = []
+model_class_files = {
+    "280.pt": "classes.txt",
+    "maggie.pt": "maggie.txt"
+}
+class_names = {}
 
-# Function to load class names
-def load_classes(classes_file="classes.txt"):
+# Function to load class names for a specific model
+def load_classes(classes_file):
     try:
         if not os.path.exists(classes_file):
             default_classes = [
@@ -84,7 +88,7 @@ def load_classes(classes_file="classes.txt"):
             with open(classes_file, 'w') as f:
                 for cls in default_classes:
                     f.write(f"{cls}\n")
-            logger.info(f"Created default classes file with {len(default_classes)} classes")
+            logger.info(f"Created default classes file {classes_file} with {len(default_classes)} classes")
             return default_classes
         
         with open(classes_file, 'r') as f:
@@ -96,7 +100,7 @@ def load_classes(classes_file="classes.txt"):
         st.error(f"Failed to load classes: {str(e)}")
         return ["product", "food", "beverage", "container", "package"]
 
-# Function to initialize models
+# Function to initialize models and their corresponding class files
 def init_models(model_paths=["280.pt", "maggie.pt"], conf_thres=0.35):
     global models, class_names
     try:
@@ -108,14 +112,15 @@ def init_models(model_paths=["280.pt", "maggie.pt"], conf_thres=0.35):
                 
         torch.serialization.add_safe_globals([DetectionModel])
         
-        # Initialize both YOLO models
+        # Initialize YOLO models and load class names
         for model_path in model_paths:
             model = YOLO(model_path)
             model.conf = conf_thres
             models[model_path] = model
-            logger.info(f"Model {model_path} initialized with confidence threshold {conf_thres}")
+            class_file = model_class_files.get(model_path, "classes.txt")
+            class_names[model_path] = load_classes(class_file)
+            logger.info(f"Model {model_path} initialized with confidence threshold {conf_thres} and class file {class_file}")
         
-        class_names = load_classes()
         return True
     except Exception as e:
         logger.error(f"Failed to initialize models: {str(e)}")
@@ -124,8 +129,7 @@ def init_models(model_paths=["280.pt", "maggie.pt"], conf_thres=0.35):
         return False
 
 # Draw bounding boxes with improved visibility
-def draw_boxes(frame, boxes, confidences, class_ids):
-    global class_names
+def draw_boxes(frame, boxes, confidences, class_ids, selected_model):
     detected_objects = []
     
     img_height, img_width = frame.shape[:2]
@@ -133,16 +137,18 @@ def draw_boxes(frame, boxes, confidences, class_ids):
     box_thickness = max(2, int(min_dimension / 300))
     font_scale = max(0.5, min_dimension / 1000)
     
+    model_classes = class_names.get(selected_model, ["unknown"])
+    
     for i, box in enumerate(boxes):
         x1, y1, x2, y2 = map(int, box)
         conf = float(confidences[i])
         label_idx = int(class_ids[i])
         
-        if label_idx >= len(class_names):
-            logger.warning(f"Invalid class index {label_idx}, using default 'unknown'")
+        if label_idx >= len(model_classes):
+            logger.warning(f"Invalid class index {label_idx} for model {selected_model}, using default 'unknown'")
             label = "unknown"
         else:
-            label = class_names[label_idx]
+            label = model_classes[label_idx]
         
         color_hash = hash(label) % 0xFFFFFF
         color = (color_hash & 0xFF, (color_hash >> 8) & 0xFF, (color_hash >> 16) & 0xFF)
@@ -169,7 +175,7 @@ def draw_boxes(frame, boxes, confidences, class_ids):
 
 # Process a single image
 def process_image(image_data, selected_model, conf_thres=0.35, iou_thres=0.45):
-    global models
+    global models, class_names
     
     if not models or selected_model not in models:
         logger.info("Models not initialized or invalid model selected, attempting to initialize")
@@ -227,7 +233,7 @@ def process_image(image_data, selected_model, conf_thres=0.35, iou_thres=0.45):
             boxes[:, 2] *= scale_x
             boxes[:, 3] *= scale_y
         
-        processed_img, detected_objects = draw_boxes(img.copy(), boxes, confidences, class_ids)
+        processed_img, detected_objects = draw_boxes(img.copy(), boxes, confidences, class_ids, selected_model)
         
         logger.info(f"Image processed successfully with {selected_model}, detected {len(detected_objects)} objects")
         return processed_img, detected_objects
