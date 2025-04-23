@@ -442,22 +442,34 @@ if 'processed_image' not in st.session_state:
 if 'original_image' not in st.session_state:
     st.session_state.original_image = None
 if 'use_cuda' not in st.session_state:
-    st.session_state.use_cuda = True
+    # Force CPU usage in Streamlit Cloud or if CUDA is unavailable
+    st.session_state.use_cuda = False
 
-# Function to check CUDA setup
+# Function to check if running on Streamlit Cloud
+def is_streamlit_cloud():
+    # Streamlit Cloud sets specific environment variables
+    return os.getenv("STREAMLIT_CLOUD") is not None or "streamlit" in os.getenv("SERVER_NAME", "").lower()
+
+# Function to check CUDA setup (only run if not on Streamlit Cloud)
 def check_cuda_setup():
+    if is_streamlit_cloud():
+        logger.info("Running on Streamlit Cloud, skipping CUDA check and forcing CPU usage.")
+        st.info("Running on Streamlit Cloud, which does not support GPU. Using CPU for inference.")
+        return False
+
     try:
         cuda_available = torch.cuda.is_available()
         if not cuda_available:
-            logger.warning("CUDA is not available. Falling back to CPU.")
+            logger.warning("CUDA is not available. Running on CPU.")
             st.warning("CUDA is not available on this system. The app will run on CPU, which may be slower.")
             return False
         
         cuda_device_count = torch.cuda.device_count()
         cuda_device_name = torch.cuda.get_device_name(0) if cuda_device_count > 0 else "Unknown"
         cuda_version = torch.version.cuda if hasattr(torch.version, 'cuda') else "Unknown"
+        
         logger.info(f"CUDA Available: {cuda_available}, Device Count: {cuda_device_count}, Device Name: {cuda_device_name}, CUDA Version: {cuda_version}")
-        st.info(f"CUDA Setup: {cuda_device_count} GPU(s) detected ({cuda_device_name}, CUDA Version: {cuda_version}). Running inference on GPU.")
+        st.info(f"CUDA Setup: {cuda_device_count} GPU(s) detected ({cuda_device_name}, CUDA Version: {cuda_version}).")
         return True
     except Exception as e:
         logger.error(f"Error checking CUDA setup: {str(e)}")
@@ -518,13 +530,23 @@ def init_models(model_paths=["280.pt", "maggie.pt"], conf_thres=0.60):
                 
         torch.serialization.add_safe_globals([DetectionModel])
         
+        # Force CPU usage on Streamlit Cloud or if CUDA is unavailable
+        if is_streamlit_cloud() or not torch.cuda.is_available():
+            device = "cpu"
+            st.session_state.use_cuda = False
+        else:
+            device = "cuda" if st.session_state.use_cuda else "cpu"
+        
+        logger.info(f"Initializing models on device: {device}")
+        
         for model_path in model_paths:
             model = YOLO(model_path)
             model.conf = conf_thres
+            model.to(device)
             models[model_path] = model
             class_file = model_class_files.get(model_path, "classes.txt")
             class_names[model_path] = load_classes(class_file)
-            logger.info(f"Model {model_path} initialized with confidence threshold {conf_thres} and class file {class_file}")
+            logger.info(f"Model {model_path} initialized with confidence threshold {conf_thres} and class file {class_file} on {device}")
         
         return True
     except Exception as e:
@@ -609,7 +631,7 @@ def draw_boxes(frame, boxes, confidences, class_ids, selected_model):
     logger.info(f"Drew {len(detected_objects)} bounding boxes")
     return frame, detected_objects
 
-# Process a single image with CPU fallback
+# Process a single image
 def process_image(image_data, selected_model, conf_thres=0.35):
     global models, class_names
     
@@ -636,7 +658,7 @@ def process_image(image_data, selected_model, conf_thres=0.35):
         
         img = preprocess_image(img)
         
-        max_dim = 2560
+        max_dim = 1280  # Already reduced for memory optimization
         h, w = original_size
         
         if h > w:
@@ -649,40 +671,22 @@ def process_image(image_data, selected_model, conf_thres=0.35):
         process_size = (new_h, new_w)
         img_resized = cv2.resize(img, (process_size[1], process_size[0]))
         
-        device = "cuda" if st.session_state.use_cuda and torch.cuda.is_available() else "cpu"
+        # Force CPU usage on Streamlit Cloud
+        device = "cpu" if is_streamlit_cloud() or not st.session_state.use_cuda else "cuda"
         logger.info(f"Running inference on device: {device}")
         
         # Ensure model is on the correct device
         models[selected_model].to(device)
         
-        try:
-            results = models[selected_model](
-                img_resized,
-                conf=conf_thres,
-                iou=0.45,  # Default IOU threshold
-                augment=True,
-                verbose=False,
-                max_det=100,
-                device=device
-            )
-        except RuntimeError as e:
-            if "CUDA" in str(e) and st.session_state.use_cuda:
-                logger.warning(f"CUDA error during inference: {str(e)}. Falling back to CPU.")
-                st.warning("CUDA error encountered during inference. Falling back to CPU for this operation.")
-                st.session_state.use_cuda = False
-                device = "cpu"
-                models[selected_model].to(device)
-                results = models[selected_model](
-                    img_resized,
-                    conf=conf_thres,
-                    iou=0.45,
-                    augment=True,
-                    verbose=False,
-                    max_det=100,
-                    device=device
-                )
-            else:
-                raise
+        results = models[selected_model](
+            img_resized,
+            conf=conf_thres,
+            iou=0.45,
+            augment=True,
+            verbose=False,
+            max_det=100,
+            device=device
+        )
         
         result = results[0]
         boxes = result.boxes.xyxy.cpu().numpy()
@@ -721,23 +725,7 @@ def process_image(image_data, selected_model, conf_thres=0.35):
         return processed_img, detected_objects
         
     except Exception as e:
-        cuda_debug_msg = """
-        **CUDA Debugging Steps:**
-        1. Set the environment variable `CUDA_LAUNCH_BLOCKING=1` before running the app:
-           - On Linux/Mac: `export CUDA_LAUNCH_BLOCKING=1`
-           - On Windows: `set CUDA_LAUNCH_BLOCKING=1`
-        2. Enable device-side assertions by setting `TORCH_USE_CUDA_DSA=1`:
-           - On Linux/Mac: `export TORCH_USE_CUDA_DSA=1`
-           - On Windows: `set TORCH_USE_CUDA_DSA=1`
-        3. Check your CUDA setup:
-           - Ensure NVIDIA drivers are up to date.
-           - Verify PyTorch CUDA version matches your CUDA toolkit (run `print(torch.version.cuda)`).
-           - Check GPU memory usage (`nvidia-smi`) and ensure there's enough free memory.
-        4. If the issue persists, try running the app with CPU only by setting `use_cuda` to False in the app settings.
-        """
         error_msg = f"Image processing error: {str(e)}."
-        if "CUDA" in str(e):
-            error_msg += cuda_debug_msg
         logger.error(error_msg)
         raise ValueError(error_msg)
 
@@ -838,8 +826,7 @@ def display_and_edit_detections(detected_objects, key_prefix):
     st.subheader("Category Distribution")
     viz_buf = create_category_visualization(edited_detections)
     if viz_buf:
-        st.image(viz_buf, caption="Distribution of Detected Product Categories", use_container_width
-=True)
+        st.image(viz_buf, caption="Distribution of Detected Product Categories", use_column_width=True)
     else:
         st.info("No detections to visualize.")
 
@@ -850,12 +837,12 @@ def main():
     st.title("📦 Grocery Product Detection")
     st.markdown("Identify grocery products with precision using advanced YOLO models.")
     
-    # Check CUDA setup at startup
+    # Check CUDA setup (skipped on Streamlit Cloud)
     if 'cuda_checked' not in st.session_state:
         st.session_state.use_cuda = check_cuda_setup()
         st.session_state.cuda_checked = True
 
-    # Sidebar (IOU Threshold removed)
+    # Sidebar (removed CUDA toggle for Streamlit Cloud)
     with st.sidebar:
         st.markdown('<div class="sidebar">', unsafe_allow_html=True)
         st.header("⚙️ Settings")
@@ -873,13 +860,14 @@ def main():
             help="Minimum confidence for detections"
         )
 
-        # Option to toggle CUDA usage
-        st.session_state.use_cuda = st.checkbox(
-            "Use GPU (CUDA)",
-            value=st.session_state.use_cuda,
-            key="use_cuda_checkbox",
-            help="Uncheck to force CPU usage if CUDA issues persist."
-        )
+        # Show CUDA toggle only if not on Streamlit Cloud
+        if not is_streamlit_cloud():
+            st.session_state.use_cuda = st.checkbox(
+                "Use GPU (CUDA)",
+                value=st.session_state.use_cuda,
+                key="use_cuda_checkbox",
+                help="Uncheck to force CPU usage if CUDA issues persist."
+            )
         
         st.header("💡 Detection Tips")
         st.markdown("""
@@ -948,13 +936,11 @@ def main():
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.session_state.original_image is not None:
-                        st.image(st.session_state.original_image, caption="Original Image", use_container_width
-=True)
+                        st.image(st.session_state.original_image, caption="Original Image", use_column_width=True)
                     else:
                         st.info("Original image not available.")
                 with col2:
-                    st.image(processed_img_rgb, caption=f"Processed Image (Model: {selected_model})", use_container_width
-=True)
+                    st.image(processed_img_rgb, caption=f"Processed Image (Model: {selected_model})", use_column_width=True)
                 
                 _, img_buf = cv2.imencode(".png", processed_img)
                 img_b64 = b64encode(img_buf).decode()
@@ -1041,13 +1027,11 @@ def main():
                     col1, col2 = st.columns(2)
                     with col1:
                         if st.session_state.original_image is not None:
-                            st.image(st.session_state.original_image, caption="Original Image", use_container_width
-=True)
+                            st.image(st.session_state.original_image, caption="Original Image", use_column_width=True)
                         else:
                             st.info("Original image not available.")
                     with col2:
-                        st.image(processed_img_rgb, caption=f"Processed Image (Model: {selected_model})", use_container_width
-=True)
+                        st.image(processed_img_rgb, caption=f"Processed Image (Model: {selected_model})", use_column_width=True)
                     
                     _, img_buf = cv2.imencode(".png", processed_img)
                     img_b64 = b64encode(img_buf).decode()
